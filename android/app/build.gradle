@@ -72,7 +72,20 @@ def enableProguardInReleaseBuilds = false
  */
 def jscFlavor = 'org.webkit:android-jsc:+'
 
+configurations.configureEach {
+    exclude group: "io.agora.rtc", module: "full-screen-sharing"
+    // Exclude Maven agora-rtm — replaced by local stripped AAR (without libaosl.so)
+    // libaosl.so from agora-rtm conflicts with the RTC SDK's version
+    exclude group: "io.agora", module: "agora-rtm"
+}
+
 android {
+    packaging {
+        jniLibs {
+            pickFirsts += ['lib/**/libaosl.so']
+        }
+    }
+
     ndkVersion rootProject.ext.ndkVersion
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion
@@ -107,7 +120,11 @@ android {
     }
 }
 
+
 dependencies {
+    // Stripped agora-rtm AAR (libaosl.so removed — provided by react-native-agora's RTC SDK)
+    implementation files('libs/agora-rtm-2.2.6-noaosl.aar')
+
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
 
