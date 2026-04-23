@@ -1,0 +1,9 @@
+{
+  "name": "agora-func",
+  "version": "1.0.0",
+  "description": "Lambda: initiates Agora calls via FCM push",
+  "main": "index.js",
+  "dependencies": {
+    "firebase-admin": "^12.0.0"
+  }
+}
