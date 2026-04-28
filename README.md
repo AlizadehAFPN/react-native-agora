@@ -71,7 +71,7 @@ A React Native video/audio calling app that uses **Agora** for real-time media, 
 |------|----------------|-------|
 | Node.js | 18 | Required by the project's `engines` field |
 | npm or yarn | any recent | Used for JS dependencies |
-| React Native CLI | 0.75.x | Matches `react-native` version in package.json |
+| `npx react-native` | (from this repo) | Uses `react-native` **0.75.5** from `package.json` — no separate global CLI version required |
 | Xcode | 15+ | Required for iOS builds |
 | Android Studio | any recent | Required for Android builds; API 23 minimum |
 | Ruby + Bundler | any recent | Required by CocoaPods |
@@ -109,10 +109,19 @@ cp src/config.example.ts src/config.ts
 
 ### 3.3 iOS — install CocoaPods
 
+If you use the `Gemfile` (recommended), install Ruby gems once, then install pods:
+
 ```bash
 cd ios
-bundle exec pod install   # preferred: uses the Gemfile-locked pod version
-# or if you don't have bundler:
+bundle install
+bundle exec pod install
+cd ..
+```
+
+If you do not use Bundler:
+
+```bash
+cd ios
 pod install
 cd ..
 ```
@@ -257,15 +266,20 @@ drops unexpectedly (app killed, network lost, device off).
 
 #### Alternative: deploy rules via Firebase CLI
 
+If you use the Firebase CLI, you need the rules as files on disk. At the project root, create:
+
+- `database.rules.json` — copy the **exact** JSON from **§5.3** (Set RTDB Rules).
+- `firestore.rules` — copy the **exact** rules from **§5.2** (Set Firestore Security Rules), or match what you already published in the console.
+
+`firebase.json` in this repo references both files. Then run:
+
 ```bash
 npm install -g firebase-tools
 firebase login
-
-# From the project root (database.rules.json is already there)
-firebase deploy --only database --project YOUR_FIREBASE_PROJECT_ID
+firebase deploy --only database,firestore --project YOUR_FIREBASE_PROJECT_ID
 ```
 
-The `database.rules.json` file at the repo root contains the exact rules above.
+> If you only use the Firebase **console** to publish rules, you can skip creating these files. You need them for `firebase deploy`.
 
 ### 5.4 Firebase Cloud Messaging (FCM)
 
@@ -285,10 +299,9 @@ covered fully in §8.
 
 > This file is git-ignored. Every developer must download and place it themselves.
 
-`@react-native-firebase` automatically applies the `google-services` Gradle
-plugin through its autolinking mechanism — you do **not** need to manually add
-`classpath 'com.google.gms:google-services'` or `apply plugin: 'com.google.gms.google-services'`
-to your build files.
+This project **already** includes the Google Services Gradle setup in
+`android/build.gradle` and `android/app/build.gradle`. Your only task is to add
+`google-services.json` in the path above. Do **not** remove those Gradle lines.
 
 ### 5.6 iOS — GoogleService-Info.plist
 
@@ -324,14 +337,14 @@ grants server-side access to your Firebase project.
 
 #### What this file is
 
-The file `react-native-agora-firebase-adminsdk-fbsvc-de2575b240.json` in the
-project root is an example of a service account key. It is git-ignored because
-it contains a private key. **Never commit this file.**
+Service account JSON files are usually named like:
 
-The filename pattern is:
 ```
 {project-id}-firebase-adminsdk-{suffix}-{hash}.json
 ```
+
+Download yours from Firebase (see below). Store it outside the repo or in a
+git-ignored path. **Never commit this file.**
 
 #### How to generate your own
 
@@ -418,6 +431,32 @@ that credentials are never hardcoded in the source code.
    Copy the output and paste it as the value.
 
 4. Click **Save**.
+
+### Step 3b — FCM `data` fields the app expects
+
+The app treats an incoming call only if the FCM **data** map includes all of
+the following (values must be **strings** — FCM requires string values in `data`):
+
+| Key | Value |
+|-----|--------|
+| `type` | **`INCOMING_CALL`** (exactly this string) |
+| `channelName` | Same as the `channelName` in the POST body |
+| `callerDisplayName` | Same as `callerDisplayName` in the POST body |
+| `callerUserId` | Same as `callerUserId` in the POST body |
+
+Inside `lambda/index.js`, the object passed to `fcm.send` → `data` should look like:
+
+```js
+data: {
+  type: 'INCOMING_CALL',
+  channelName: String(channelName),
+  callerDisplayName: String(callerDisplayName),
+  callerUserId: String(callerUserId),
+},
+```
+
+If this `type` field is missing, the callee may get the push but the
+incoming-call UI will not open.
 
 ### Step 4 — Package and upload the Lambda
 
@@ -509,14 +548,12 @@ devices will **not** receive incoming-call notifications.
 
 ### 8.1 What is the .p8 key file?
 
-`AuthKey_UZX8LP8Q72.p8` is an **APNs Authentication Key** — a private key
-issued by Apple that lets Firebase communicate with Apple's push notification
-servers on your behalf.
+An **APNs Authentication Key** (`.p8`) is a private key issued by Apple that
+lets Firebase talk to Apple’s push servers on your behalf. Downloads are named:
 
-The filename encodes the **Key ID**: `AuthKey_{KEY_ID}.p8`  
-In this project the Key ID is `UZX8LP8Q72`.
+`AuthKey_{KEY_ID}.p8`
 
-This file is git-ignored and must be generated per Apple Developer account.
+Keep the file private. Do not commit it (use `.gitignore` or store outside the repo).
 
 ### 8.2 Generate your own APNs Auth Key
 
@@ -543,7 +580,7 @@ This file is git-ignored and must be generated per Apple Developer account.
 2. Scroll to the **Apple app configuration** section.
 3. Under **APNs Authentication Key**, click **Upload**.
 4. Select your `.p8` file.
-5. Enter your **Key ID** (e.g. `UZX8LP8Q72`).
+5. Enter your **Key ID** (the 10-character id from the Apple Developer portal).
 6. Enter your **Team ID** (10-character Apple Developer Team ID).
 7. Click **Upload**.
 
@@ -570,32 +607,14 @@ After this, Firebase can deliver push notifications to iOS devices using APNs.
    > this background mode enabled, iOS will not wake the app and the
    > incoming-call UI will never appear.
 
-### 8.5 Add [FIRApp configure] to AppDelegate.mm
+### 8.5 Firebase in AppDelegate.mm
 
-`@react-native-firebase` v21 requires Firebase to be initialised in the native
-app delegate. Open `ios/Agora/AppDelegate.mm` and modify it as follows:
+`@react-native-firebase` needs Firebase to start at launch. In **this** repo,
+`ios/Agora/AppDelegate.mm` already imports Firebase Core and calls `[FIRApp configure]`
+when no default app exists. When setting up a fresh clone, confirm your file
+matches that pattern (import `FirebaseCore`, configure before `[super application:...]`).
 
-```objc
-#import "AppDelegate.h"
-#import <React/RCTBundleURLProvider.h>
-#import <Firebase.h>          // ← ADD THIS LINE
-
-@implementation AppDelegate
-
-- (BOOL)application:(UIApplication *)application
-    didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
-{
-  [FIRApp configure];          // ← ADD THIS LINE (before [super ...])
-  self.moduleName = @"Agora";
-  self.initialProps = @{};
-  return [super application:application didFinishLaunchingWithOptions:launchOptions];
-}
-
-// ... rest of the file unchanged
-```
-
-Without `[FIRApp configure]`, Firebase will not initialise on iOS and you will
-see a crash or FCM will silently fail to deliver notifications.
+Without a successful configure call, FCM on iOS may not work.
 
 ### 8.6 Request notification permission from JavaScript
 
@@ -628,10 +647,10 @@ On Android, FCM works natively without APNs. The Lambda sends a high-priority
 message (`android: { priority: 'high' }`), which wakes Android devices even
 in Doze mode.
 
-No extra configuration is needed beyond placing `google-services.json` in
-`android/app/` as described in §5.5.
+Place `google-services.json` as described in §5.5. On **Android 13 and newer**,
+the app also requests the **notification** permission at runtime (declared below).
 
-All required permissions are already declared in
+All relevant permissions are already declared in
 `android/app/src/main/AndroidManifest.xml`:
 
 ```xml
@@ -645,6 +664,8 @@ All required permissions are already declared in
 <uses-permission android:name="android.permission.READ_PHONE_STATE" />
 <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+<!-- Android 13+ notification permission -->
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 ```
 
 ---
@@ -681,7 +702,8 @@ npx react-native run-android
 ### What happens on first launch
 
 1. A unique `userId` (UUID) is generated and saved on the device.
-2. The app requests FCM permission from the OS (iOS shows a system dialog).
+2. The app requests push notification permission (iOS dialog; **Android 13+**
+   also prompts for notifications).
 3. The **Setup screen** appears — enter a display name and tap **Continue**.
 4. The app writes `{ displayName, fcmToken }` to Firestore `users/{userId}`.
 5. The **Home screen** loads and shows other registered users.
@@ -773,11 +795,17 @@ embedding conflict between pods.
 on `AgoraRtm/RtmKit` (excluding the `aosl` framework), since `react-native-agora`
 already provides it via `AgoraVideo_Special_iOS`.
 
+### Push arrives but incoming-call UI does not show (callee)
+
+- Confirm **§6 Step 3b**: the Lambda `fcm.send` **data** must include
+  `type: 'INCOMING_CALL'` plus the three call fields. Without `type`, the app
+  ignores the message for incoming-call handling.
+
 ### FCM token not received on iOS
 
 - Make sure §8 is completed fully: APNs key uploaded to Firebase, Push
   Notifications capability added in Xcode, Remote notifications background mode
-  enabled, `[FIRApp configure]` added to `AppDelegate.mm`.
+  enabled, and Firebase configured in `AppDelegate.mm` as in §8.5.
 - FCM tokens are **not issued on iOS Simulators**. Test on a real physical device.
 - Always open `Agora.xcworkspace` (not `Agora.xcodeproj`) in Xcode after running
   `pod install`.
@@ -840,16 +868,19 @@ npx patch-package
 
 ## 13. File Reference
 
-| File | Purpose | Committed? |
-|------|---------|------------|
-| `src/config.ts` | Agora App ID + Lambda URL | **No** — copy from `config.example.ts` |
+| File | Purpose | In repo? |
+|------|---------|----------|
+| `src/config.ts` | Agora App ID + Lambda URL | **No** — git-ignored; copy from `config.example.ts` |
 | `src/config.example.ts` | Template for `config.ts` | Yes |
-| `android/app/google-services.json` | Firebase Android config | **No** — download from Firebase Console |
-| `ios/Agora/GoogleService-Info.plist` | Firebase iOS config | **No** — download from Firebase Console |
-| `*-firebase-adminsdk-*.json` | Firebase Admin SDK service account key | **No** — generate from Firebase Console |
-| `AuthKey_XXXXXXXXXX.p8` | Apple APNs authentication key | **No** — generate from Apple Developer portal |
-| `lambda/index.js` | AWS Lambda function source code | Yes |
-| `lambda/package.json` | Lambda dependency manifest | Yes |
-| `database.rules.json` | Firebase RTDB security rules | Yes |
-| `patches/agora-react-native-rtm+2.2.6.patch` | Native SDK conflict fix (RTM + RTC) | Yes |
-| `android/app/libs/agora-rtm-2.2.6-noaosl.aar` | Stripped Agora RTM AAR (no `libaosl.so`) | Yes |
+| `android/app/google-services.json` | Firebase Android config | **No** — git-ignored; download from Firebase Console |
+| `ios/Agora/GoogleService-Info.plist` | Firebase iOS config | **No** — git-ignored; download from Firebase Console |
+| `*-firebase-adminsdk-*.json` | Firebase Admin SDK key (Lambda env) | **No** — generate in Firebase; never commit |
+| `AuthKey_*.p8` | Apple APNs key (upload to Firebase) | **No** — generate in Apple Developer portal |
+| `firestore.rules` | Firestore rules for `firebase deploy` | Often git-ignored — create from **§5.2** if using CLI |
+| `database.rules.json` | RTDB rules for `firebase deploy` | Often git-ignored — create from **§5.3** if using CLI |
+| `firebase.json` | Firebase CLI mapping for rules files | Yes |
+| `lambda/index.js` | AWS Lambda source | Yes |
+| `lambda/package.json` | Lambda dependencies | Yes |
+| `patches/agora-react-native-rtm+2.2.6.patch` | RTM + RTC native fix | Yes |
+| `android/app/libs/agora-rtm-2.2.6-noaosl.aar` | Stripped Agora RTM AAR | Yes |
+| `agora-func.zip` | Lambda deployment zip (local build) | **No** — git-ignored; build in §6 |
