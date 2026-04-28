@@ -8,14 +8,33 @@ require Pod::Executable.execute_command('node', ['-p',
 platform :ios, min_ios_version_supported
 prepare_react_native_project!
 
-linkage = ENV['USE_FRAMEWORKS']
-if linkage != nil
-  Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green
-  use_frameworks! :linkage => linkage.to_sym
+# RN Firebase requires static frameworks to avoid linker errors with Firebase C++ SDK
+$RNFirebaseAsStaticFramework = true
+
+# Agora RTC (react-native-agora) and RTM (agora-react-native-rtm) both vendor aosl.xcframework.
+# CocoaPods rejects duplicate framework names on Pods-Agora. Keep the RTC copy, strip RTM's duplicate.
+# https://docs.agora.io/en/help/integration-issues/rtm2_rtc_integration_issue
+pre_install do |installer|
+  require 'fileutils'
+  aosl = File.join(installer.sandbox.root.to_s, 'AgoraRtm', 'aosl.xcframework')
+  if File.exist?(aosl)
+    Pod::UI.puts '[Podfile] Removing duplicate aosl.xcframework from AgoraRtm (RTC already includes aosl).'.yellow
+    FileUtils.rm_rf(aosl)
+  end
 end
 
 target 'Agora' do
   config = use_native_modules!
+
+  # Static frameworks (not global use_modular_headers!) — modular headers breaks gRPC-C++
+  # (missing Pods/Headers/Private/grpc/gRPC-Core.modulemap). See invertase/react-native-firebase#7805.
+  linkage = ENV['USE_FRAMEWORKS']
+  if linkage != nil
+    Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green
+    use_frameworks! :linkage => linkage.to_sym
+  else
+    use_frameworks! :linkage => :static
+  end
 
   use_react_native!(
     :path => config[:reactNativePath],
@@ -37,4 +56,50 @@ target 'Agora' do
       # :ccache_enabled => true
     )
   end
+end
+
+# After CocoaPods integrates the app project (RNFB script is rewritten here). Root-level hook so it
+# always runs — avoids exit 127 from missing node/ruby/python3 or empty REACT_NATIVE_PATH.
+post_integrate do |installer|
+  app_project_path = File.expand_path('Agora.xcodeproj', installer.sandbox.root.parent)
+  next unless File.directory?(app_project_path)
+
+  require 'xcodeproj'
+  path_export = 'export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"'
+  project = Xcodeproj::Project.open(app_project_path)
+  project.native_targets.each do |target|
+    target.build_phases.each do |phase|
+      next unless phase.is_a?(Xcodeproj::Project::Object::PBXShellScriptBuildPhase)
+
+      case phase.name
+      when '[CP-User] [RNFB] Core Configuration'
+        phase.shell_path = '/bin/bash'
+        s = phase.shell_script || ''
+        unless s.include?('[Podfile] PATH bootstrap')
+          if s.start_with?('#!') && (nl = s.index("\n"))
+            phase.shell_script = s[0, nl + 1] + "# [Podfile] PATH bootstrap (Xcode script 127)\n#{path_export}\n" + s[nl + 1..]
+          else
+            phase.shell_script = "# [Podfile] PATH bootstrap (Xcode script 127)\n#{path_export}\n" + s
+          end
+        end
+        Pod::UI.puts '[Podfile] RNFB: shellPath=/bin/bash + PATH bootstrap.'.green
+      when 'Bundle React Native code and images'
+        phase.shell_path = '/bin/bash'
+        phase.shell_script = <<~'SCRIPT'
+          set -e
+          export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH}"
+          export REACT_NATIVE_PATH="${REACT_NATIVE_PATH:-${SRCROOT}/../node_modules/react-native}"
+          if [ ! -f "${REACT_NATIVE_PATH}/scripts/xcode/with-environment.sh" ]; then
+            echo "error: React Native not found at REACT_NATIVE_PATH=${REACT_NATIVE_PATH} (SRCROOT=${SRCROOT})." >&2
+            exit 1
+          fi
+          WITH_ENVIRONMENT="${REACT_NATIVE_PATH}/scripts/xcode/with-environment.sh"
+          REACT_NATIVE_XCODE="${REACT_NATIVE_PATH}/scripts/react-native-xcode.sh"
+          exec /bin/bash "${WITH_ENVIRONMENT}" "${REACT_NATIVE_XCODE}"
+        SCRIPT
+        Pod::UI.puts '[Podfile] Bundle React Native: REACT_NATIVE_PATH fallback + PATH.'.green
+      end
+    end
+  end
+  project.save
 end
